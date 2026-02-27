@@ -1,23 +1,26 @@
 # Copyright IBM Corp. 2015, 2025
 # SPDX-License-Identifier: BUSL-1.1
 
-# nginx job — static port approach
+# nginx job — host network with a configurable static port
 #
-# This job uses a *static* port in Nomad's network stanza.  When Nomad submits
-# the Docker port-mapping to the Docker daemon it uses the form
-#   -p 0.0.0.0:<host_port>:<container_port>
-# which binds the host port on *all* interfaces, making the container
-# reachable from outside the machine.
+# This job runs nginx using Docker host networking so it binds to 0.0.0.0 on
+# the host.  nginx is configured via a rendered template to listen on port 8080
+# rather than the default port 80, which is useful when:
+#   • Port 80 is already occupied on the host node.
+#   • You need multiple nginx containers on the same node, each on a different
+#     port, while keeping every one accessible on all network interfaces.
 #
-# By contrast, *dynamic* ports (no `static` value) default to an ephemeral
-# port on 127.0.0.1 in many Docker / kernel configurations, which is why the
-# container is unreachable from other hosts when running in -dev mode.
+# Why NOT bridge mode with a static port?
+# Nomad's Docker driver always passes the host's assigned IP address as the
+# Docker bind IP (e.g. -p 127.0.0.1:8080:80 in dev mode).  Using bridge mode
+# therefore binds the port to 127.0.0.1 in dev mode, which is exactly the
+# problem being solved.  Host networking bypasses Docker NAT entirely: nginx
+# listens directly on 0.0.0.0:8080 of the host's network stack.
 #
 # When to use this approach:
-#   • You want a predictable, well-known port number.
-#   • You need standard Docker isolation (no host-network sharing).
+#   • You want a predictable, well-known port number AND 0.0.0.0 binding.
 #   • You may run multiple nginx jobs on the same cluster by giving each job a
-#     different static port.
+#     different static port value.
 #
 # Usage:
 #   nomad job run NomadTestConfigs/nginx-static-port.nomad.hcl
@@ -30,12 +33,14 @@ job "nginx-static-port" {
     count = 1
 
     network {
-      # `static` pins the host-side port.  Nomad's Docker driver publishes
-      # this as  0.0.0.0:8080 -> 80  so the container is reachable on port
-      # 8080 of every network interface on the host.
+      # Host networking: no Docker NAT, container shares the host network stack.
+      mode = "host"
+
+      # The `static` value tells Nomad's service catalog which host port this
+      # container listens on.  nginx will be configured below to actually bind
+      # to this port on 0.0.0.0.
       port "http" {
         static = 8080
-        to     = 80
       }
     }
 
@@ -58,9 +63,35 @@ job "nginx-static-port" {
       config {
         image = "nginx:latest"
 
-        # Tell Nomad which named ports from the network stanza to expose.
-        # Nomad translates this to  -p 0.0.0.0:8080:80  for the Docker daemon.
+        # Host networking: nginx listens directly on the host's network
+        # namespace, binding to 0.0.0.0:8080 on every interface.
+        network_mode = "host"
+
         ports = ["http"]
+
+        mount {
+          type   = "bind"
+          source = "local/nginx.conf"
+          target = "/etc/nginx/nginx.conf"
+        }
+      }
+
+      # Render a minimal nginx.conf that explicitly listens on 0.0.0.0 using
+      # the port Nomad assigned (NOMAD_PORT_http = 8080).
+      template {
+        destination = "local/nginx.conf"
+        data        = <<EOT
+events {}
+http {
+  server {
+    listen 0.0.0.0:{{ env "NOMAD_PORT_http" }};
+    location / {
+      root  /usr/share/nginx/html;
+      index index.html;
+    }
+  }
+}
+EOT
       }
 
       resources {

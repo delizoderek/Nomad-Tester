@@ -39,6 +39,21 @@ server {
 # Run the client on the same node.
 client {
   enabled = true
+
+  # Set this to the network interface that other machines should use to reach
+  # services on this host.  Common values: "eth0", "ens3", "enp0s3".
+  # Run `ip route get 1 | awk '{print $5; exit}'` to find the default interface.
+  #
+  # This matters because Nomad assigns the interface's IP as the HostIP for
+  # every allocated port.  When it is unset in dev mode, Nomad defaults to "lo"
+  # (loopback), so Docker binds ports to 127.0.0.1 instead of the real NIC —
+  # which is exactly the problem this config set is designed to avoid.
+  #
+  # If you use the nginx job specs in this directory (which use
+  # network_mode = "host"), the Docker port binding is bypassed entirely and
+  # this setting does not affect reachability.  Set it anyway so that Nomad's
+  # service catalog and health checks advertise the correct address.
+  network_interface = "eth0" # ← REPLACE with your actual interface name (e.g. "ens3", "enp0s3")
 }
 
 # Advertise the agent's reachable address to other cluster members.

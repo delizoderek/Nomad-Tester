@@ -13,22 +13,38 @@ nomad agent -dev -bind 0.0.0.0
 ```
 
 The `-bind 0.0.0.0` flag only affects the **Nomad HTTP API / dashboard** port.
-Docker containers created by Nomad are assigned **dynamic ports** whose
-host-side binding defaults to `127.0.0.1` in many Docker/kernel
-configurations, making those containers unreachable from any host other than
-`localhost`.
+Docker containers created by Nomad are assigned ports whose host-side binding
+is controlled by the `HostIP` that Nomad's scheduler assigns to each port.
+
+In dev mode on Linux, Nomad defaults to `network_interface = "lo"` (loopback).
+That means every port's `HostIP` is `127.0.0.1`, and Docker receives the
+binding as `-p 127.0.0.1:<port>:<container_port>` — making those containers
+unreachable from any other host.
+
+Passing `-bind 0.0.0.0` to the Nomad agent does **not** change this; `HostIP`
+is determined by the client's `network_interface`, not by `bind_addr`.
 
 ## The Solution
 
-There are two complementary fixes, each provided as a separate job spec:
+Both job specs use `network_mode = "host"` so Docker containers share the
+host's network namespace and nginx listens directly on `0.0.0.0` — no Docker
+NAT or port-forwarding is involved.
 
-| File | Approach | Best for |
-|------|----------|----------|
-| `nginx-host-network.nomad.hcl` | `network_mode = "host"` | Simplest setup; container shares the host network stack |
-| `nginx-static-port.nomad.hcl`  | Static port `0.0.0.0:<port>` | Standard Docker isolation; predictable port number |
+| File | nginx port | Best for |
+|------|-----------|----------|
+| `nginx-host-network.nomad.hcl`  | 80   | Single nginx instance per node, default port |
+| `nginx-static-port.nomad.hcl`   | 8080 | Multiple nginx instances per node, different ports |
 
 An accompanying `agent.hcl` replaces the `-dev` flag with an explicit
 server+client config that correctly advertises the host IP.
+
+> **Why not bridge mode with a static port?**
+> In Nomad's Docker driver, the host-side bind IP always comes from the port's
+> `HostIP` (set from the client's `network_interface`).  In dev mode this is
+> `127.0.0.1`, so even a static port would be bound as
+> `-p 127.0.0.1:8080:80` — still unreachable externally.
+> Using `network_mode = "host"` bypasses Docker port mapping entirely and is
+> the only reliable way to bind nginx to all host interfaces (`0.0.0.0`).
 
 ---
 
@@ -36,8 +52,13 @@ server+client config that correctly advertises the host IP.
 
 ### `agent.hcl`
 
-A combined server+client Nomad agent configuration.  Replace `YOUR_HOST_IP`
-with the actual IP address of the machine before using it.
+A combined server+client Nomad agent configuration.  Edit the two placeholder
+values before using it:
+- Replace `YOUR_HOST_IP` in the `advertise` block with the machine's actual IP.
+  Run `ip route get 1 | awk '{print $7; exit}'` to print the source IP for
+  outbound traffic (the IP other machines use to reach this host).
+- Replace `"eth0"` in `network_interface` with the NIC name for that IP.
+  Run `ip route get 1 | awk '{print $5; exit}'` to print the interface name.
 
 ```
 nomad agent -config=NomadTestConfigs/agent.hcl
@@ -45,6 +66,8 @@ nomad agent -config=NomadTestConfigs/agent.hcl
 
 Key settings:
 - `bind_addr = "0.0.0.0"` — binds the Nomad dashboard and API to all interfaces.
+- `client { network_interface = "eth0" }` — ensures ports are registered with
+  the real NIC address, not the loopback.
 - `advertise { http/rpc/serf = "YOUR_HOST_IP" }` — tells cluster members which
   IP to use when contacting this node.
 
@@ -53,8 +76,8 @@ Key settings:
 ### `nginx-host-network.nomad.hcl`
 
 Deploys nginx using Docker's **host network mode**.  The container shares the
-host's network namespace so nginx's `0.0.0.0:80` binding is visible on every
-interface of the host.
+host's network namespace so nginx's default `0.0.0.0:80` binding is visible on
+every interface of the host.
 
 ```
 nomad job run NomadTestConfigs/nginx-host-network.nomad.hcl
@@ -70,9 +93,11 @@ to the host.
 
 ### `nginx-static-port.nomad.hcl`
 
-Deploys nginx with a **static port mapping** (`0.0.0.0:8080 → 80`).  Nomad
-instructs the Docker daemon to publish the container port with an explicit
-`0.0.0.0` bind address, making it reachable on all interfaces.
+Deploys nginx with host networking and a rendered `nginx.conf` that tells nginx
+to listen on `0.0.0.0:8080`.  The Nomad `static = 8080` port in the network
+stanza informs the service catalog of the port; because `network_mode = "host"`
+is used, Docker does no port mapping — nginx itself owns the port directly on
+the host.
 
 ```
 nomad job run NomadTestConfigs/nginx-static-port.nomad.hcl
@@ -91,6 +116,8 @@ to the host.
 `nomad agent -dev` is designed for **local development only**.  In addition to
 the port-binding issue described above, the dev agent:
 
+- Sets `network_interface = "lo"`, causing all port `HostIP` values to be
+  `127.0.0.1`.
 - Does not persist any state between restarts.
 - Uses `localhost` for all internal communication.
 - Skips several security checks.

@@ -38,7 +38,6 @@ job "nginx-host-network" {
 
       port "http" {
         static = 80
-        to     = 80
       }
     }
 
@@ -64,6 +63,8 @@ job "nginx-host-network" {
         # Share the host network namespace — the container will see and bind to
         # all interfaces that the host has (including 0.0.0.0).
         network_mode = "host"
+
+        ports = ["http"]
       }
 
       resources {
